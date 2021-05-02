@@ -1,0 +1,6 @@
+"0","  tweet_rows %>%
+    mutate(across(is.character, ~ str_remove_all(., ""\\n""))) %>%
+    with(print(str_glue(""\n{twt_brk}\n{user_name} | @{screen_name} | {created_at %>% with_tz('US/Eastern') %>% strftime('%d %b %Y %R')} EST\n{str_wrap(full_text, indent = 3, exdent = 3, width = 80)}"")))
+"
+"2","Error in eval(lhs, parent, parent) : object 'tweet_rows' not found
+"

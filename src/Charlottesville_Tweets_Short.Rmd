@@ -1,0 +1,545 @@
+---
+title: 'Twitter as Public Sphere'
+subtitle: 'An exploratory analysis of #Charlottesville on Twitter'
+author: 'James Alster'
+date: '09-06-2020'
+output: 
+  pdf_document:
+    latex_engine: xelatex
+mainfont: 'Source Sans Pro'
+bibliography: [./markdown_resources/articles_short.bib, ./markdown_resources/software.bib]
+csl: ./markdown_resources/am_pol_sci_cit.csl
+nocite: |
+  @*
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE,
+                      warning = FALSE,
+                      message = FALSE,
+                      cache = TRUE,
+                      fig.width = 10,
+                      fig.asp = 5/7,
+                      fig.topcaption = TRUE)
+```
+
+``` {r load_packages, cache = FALSE}
+
+#general
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(knitr)
+#graphs
+library(scales)
+library(colorspace)
+library(patchwork)
+#text
+library(cld2)
+library(tidytext)
+library(fuzzyjoin)
+library(topicmodels)
+#networks
+library(widyr)
+library(tidygraph)
+library(ggraph)
+
+```
+
+# Introduction
+
+## Background
+
+On 11^th^-12^th^ August 2017, far-right and white supremacist groups organised the ‘Unite the Right’ rally in Charlottesville, Virginia. The rally opposed the ongoing movement aiming to take down prominent monuments commemorating the Confederate side in the US Civil War, among them a statue of the general Robert E. Lee in Charlottesville, whose removal was planned. Hundreds marched – or thousands according to some sources – and confrontations broke out between the marchers and an anti-fascist counter protest. Thirty-four people were injured, and one woman, Heather Heyer, was killed when a car drove into the counter-protest, whose driver was subsequently found guilty of first-degree murder and hate crime (Fortin 2017, Spencer and Stolberg 2017, Stolberg and Rosenthal 2017, Duggan and Jouvenal 2019). 
+
+In a press conference on the 15th of August, President Trump said that “*there is blame on both sides*” for the violence that occurred: “*you also had people that were very fine people on both sides*” (Politico Staff, 2017). These words were interpreted as failing to condemn the racist beliefs defended by the ‘Unite the Right’ rally, while partly blaming those who had opposed it. The press conference led to a media and Twitter outcry, of which the dataset examined here is a part.
+
+## The Dataset
+
+``` {r load_data}
+
+#downloaded on 25/5/2020 from 
+#https://www.kaggle.com/vincela9/charlottesville-on-twitter/version/1
+
+raw_tweets = tibble(filename = str_c("../data/aug", 15:17, "_sample.csv.zip")) %>%
+  rowwise() %>%
+  summarise(filename = filename,
+            read_csv(filename))
+
+```
+
+``` {r prep_data}
+
+##  Language and Word Groups ##
+
+groups = c("white supremacis",
+           "white nationalis",
+           "klu klux klan",
+           "black lives matter",
+           "both sides",
+           "fake news",
+           "fox news",
+           "white house",
+           "the people",
+           "press conference") 
+
+make_groupings = function(text_vec, groups) {
+  gp_rx = str_c("(?i)", str_c(groups, collapse = "|"))
+  str_replace_all(text_vec, gp_rx, function(x) str_replace_all(x, "\\s", "_"))
+}
+
+tweets = raw_tweets %>%
+  filter(detect_language(full_text) == "en") %>%  #only english
+  mutate(full_text = make_groupings(full_text, groups)) #group important word 
+
+## Tokenise ##
+
+by_word = tweets %>%   
+  unnest_tokens(word, full_text, token = "regex",
+                pattern = "[[:punct:][:space:]-[\\'/#@_-]]", to_lower = TRUE) %>%
+  filter(!str_detect(word, "^(https|t|www|s|//t|n|[0-9]|-|\\||via)$"), #no url bits, which we've broken up
+         !str_detect(word, "^co/"), #ditto
+         !str_detect(word, "[^[:ascii:]]"),  #no emojis
+         !str_detect(word, "^amp$"), #no amp
+         !str_detect(word, "charlottesville")) %>% #no charlottesville
+  anti_join(get_stopwords('en')) #no stopwords
+
+```
+
+The dataset contains three batches of 50 000 tweets mentioning “Charlottesville” or using the hashtag #Charlottesville, over a 42 hour period from 15^th^ -17^th^ August. They were published on the open data website Kaggle, owned by Google, on 18th August 2017 by user VincentLa (VincentLa 2017). According to the documentation provided, the tweets were accessed via the Twitter Stream API, which provides a random sample of tweets corresponding to a given search. While this random sample is sufficiently large to provide a robust picture of any population size, it is important to remember that there is no external control on the randomness of Twitter’s sampling, which may be influenced by unpublished algorithms (Boyd and Crawford 2011). Moreover, while the short collection and quick publication of the dataset provides a voluminous and detailed picture, such API-based data sets are not optimally constructed for social science analysis (Venturini et al. 2014). In this case, the dataset only starts several hours after Trump’s comments, and several days after the events in Charlottesville. Collecting tweets via a search for the term ‘Charlottesville’ is an obvious way of ensuring relevancy to the topic, but is not necessarily superior to alternative methods of collection, such as snowballing, which would preserve far more interactions between specific tweets.
+
+``` {r tweets_over_time, fig.asp = 5/9, fig.cap = "Distribution of tweets by datetime.\nTimes are in EST, the local time in Charlottesville and of Trump’s press conference."}
+
+#### Tweets over time ####
+
+#get eastern standard time
+raw_tweets_est = raw_tweets %>%
+  mutate(created_at_est = with_tz(created_at, "US/Eastern"),
+         filename = str_remove(filename, "data/"))
+
+#find last tweet in each file
+last_twts = raw_tweets_est %>%
+  group_by(filename) %>%
+  summarise(time = max(created_at))
+
+#plot
+ggplot(raw_tweets_est, aes(x = created_at_est, fill = filename)) +
+  #..count.. exposes number per unit of x (here, per second).
+  #adjust adjusts the bin size for smoothing
+  geom_density(aes(y = ..count.. * 60), adjust = 1/2) +
+  geom_vline(data = last_twts, aes(xintercept = time), linetype = "dashed") +
+  scale_x_datetime(breaks = breaks_pretty(8),
+                   labels = label_date_short(format = c("", "", "%b %d", "%H:%M"))) +
+  scale_y_continuous(name = "tweets per minute") +
+  labs(x = "time created (Eastern Standard Time)",
+       title = "Distribution of tweets by time created",
+       subtitle = str_glue("n = {nrow(raw_tweets_est)}, {nrow(raw_tweets_est) / 3} per file")) +
+  scale_fill_discrete_qualitative(palette = "Harmonic") +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+```
+
+Figure 1 provides more detail about the distribution of the tweets. The volume of twitter activity on the evening of the 15th is so great that the first 50 000 tweets do not cover more than a few hours. The last file also covers less than 24 hours, which implies that the extent of the data set has been determined by the rate of tweeting. The sharp cutoff of the initial spike is therefore perhaps a product of the API rather than a reflection of the rate of tweeting in the full population, and it therefore seems unlikely that this graph corresponds to the rate of tweeting about #Charlottesville in the full population of tweets. Statistics for the total number of #Charlottesville tweets are not publicly available, but a point of comparison can be given by the hashtag #Inauguration, which had peaked at 58 000 tweets per minute during Trump’s inauguration in January 2017. [^1] While there may have been less activity around #Charlottesville, it nevertheless seems that this dataset, which peaks at 300 tweets per minute, contains only a small proportion of the total. The hole in the dataset apparently corresponds to a connection failure noted by VincentLa (2017).
+
+[^1]: https://twitter.com/TwitterGov/status/823934942900060164
+
+## Twitter as Public Sphere
+
+The dataset accordingly represents a sample of tweets that do not so much respond to events in Charlottesville on 11^th^ and 12^th^ August as much as denounce Trump’s comments on the 15^th^. It concerns only a single issue, one about which holding a strong opinion might be thought very much normal. I will therefore consider the tweets as an instance of public debate, in the public sphere that is Twitter. Jehel (2018) observes that Twitter can be regarded as a succession of interlocking spaces of communication, from ‘semi-private’, where tweets are only visible to followers, permitting group discussion, to ‘public’, where tweets are thrown into the public stream defined by a hashtag which is visible to any other account. The latter form of communication is particularly characteristic of Twitter: a many-to-many group discussion about a common issue (Cardon 2010), involving an enormous public. Twitter is the least constrained mass forum for public discussion currently available, and comes closest to public discussion in a crowd, where anyone can shout and speak in a format little constrained by procedure and societal norms. It corresponds to the model of the public sphere that Cefaï (2016) terms an ‘agora’: an egalitarian free-for-all, or at least realtively so compared to other forms of the public sphere such as print media, television and parliamentary politics, in which public contribution is tightly regulated. 
+
+The public debate over Trump’s comments on Charlottesville was literally worldwide. 17% of users in the dataset come from a non-US timezone, with small numbers in a wide variety of African and Asian countries. That figure probably include many expatriates, although `r round(( 1 - (nrow(tweets) / nrow(raw_tweets))) * 100, 1)`% of the dataset is not in English. Although some people may have had multiple accounts, and some accounts are automated, the public debate around Charlottesville contained in this dataset alone actively engaged about a hundred thousand people, over ten thousand of whom were abroad. The heavily mediatised events at Charlottesville became a focus for interaction on a global scale, almost completely divorced from actual presence at the event or any concrete personal impact (Goldfarb 2018). The dataset is an opportunity to study the structure and characteristics of this massive, global public debate: how did people conceptualise their role in public space? How did they position, associate or contrast other actors? What social ties and oppositions did they construct or invoke? The analysis that follows is only exploratory, and seeks to provide indications of how these questions might be more fully answered.
+
+# User Characteristics
+
+The dataset contains the full text of `r nrow(raw_tweets)` tweets, of which `r round(nrow(tweets) / nrow(raw_tweets) * 100, 1)`% are in English. [^2]  They come with the time the tweet was created, as well as URLs to picture or content, which I have not recuperated here. None of the tweets are retweets, which will exclude most automated accounts. `r sum(!is.na(raw_tweets$in_reply_to_status_id))` are replies, of which only `r with(raw_tweets, sum(id %in% in_reply_to_status_id))` are replies to other tweets in the data set: the collection of tweets by term rather than by snowballing has made the dataset unsuitable for the study of specific user interactions.
+
+[^2]: All text analysis below is of english tweets only.
+
+The tweets were tweeted by `r n_distinct(raw_tweets$user_id)` users, each of whom come with their name, screen name, user description, text colour, and background colour, none of which are analysed here, although the user description could be used in an attempt to construct some demographic variables. The user location is given, along with timezone. Twitter allows users to enter any location and timezone, and above I have used timezone since I feel it is more likely to correspond to the user’s actual location. Finally, four numeric variables are given for each user: number of ‘statuses’ or tweets, number of followers, number of friends, and number of tweets designated as a ‘favourite’. All four of these variables are log-normally distributed, a few users having values that are orders of magnitude larger than most other users, or values close to zero. Apart from ‘favourites’, they are all strongly correlated (r^2^ ≈ 0.7), so the most followed users have also been historically the most active. 
+
+``` {r tweet_freq_distribution, fig.asp = 9/5}
+
+## Frequency of tweeting by user ##
+
+#get tweets per user
+user_tweets = raw_tweets %>%
+  count(user_id, name = "n_tweets")
+
+#calculate confidence interval
+n_twt_conf = user_tweets %>%
+  summarise(mean = mean(n_tweets),
+            sd = sd(n_tweets),
+            n_users = n()) %>%
+  mutate(error = qnorm(0.975) * sd / sqrt(n_users),
+         lower = mean - error,
+         upper = mean + error,
+         across(everything(), ~ round(., 2)))
+
+#get top user
+top_user = user_tweets %>%
+  right_join(raw_tweets, by = "user_id") %>%
+  filter(n_tweets == max(n_tweets)) %>%
+  pull(user_name) %>%
+  pluck(1)
+
+#get percentage of tweeters tweeted by those who tweet more than 5 times
+pct_over_5 = user_tweets %>%
+  group_by(over_5 = n_tweets > 5) %>%
+  summarise(tot = sum(n_tweets)) %>%
+  mutate(pct = round(tot / sum(tot) * 100, 1)) %>%
+  filter(over_5) %>% pull(pct)
+
+#tabulate tweets per user
+user_tweets %>%
+  mutate(n_tweets = fct_other(as.character(n_tweets),
+                       keep = as.character(1:5),
+                       other_level = ">5")) %>%
+  tabyl(n_tweets) %>%
+  adorn_totals('row') %>%
+  adorn_pct_formatting(1) %>%
+  kable(caption = "Table 1: Number of tweets per user")
+  
+```
+
+For the structure of a public space, the important question is: how much of the content is produced by the most active users? Table 1 shows the distribution of users by number of tweets. Most users only tweeted once or twice: the mean is `r n_twt_conf$mean`, with a 95% confidence interval between `r n_twt_conf$lower` and `r n_twt_conf$upper`. The proportion of multiple tweeters is small, and only 1.7% tweeted more than five times (`r top_user`, who tweeted `r max(user_tweets$n_tweets)` times, was the most prolific). But users who tweeted over five times were responsible for `r pct_over_5`% of tweets, certainly non-negligible. While the space of #Charlottesville tweets is rather egalitarian, a few prolific users do contribute far more than others.
+
+``` {r numeric_user_vars, fig.asp = 5/11, fig.cap = "Distribution of users by number of followers"}
+
+## compare statuses and followers with random sample ##
+
+#load random sample
+random_users = read_rds("../resources/random_tweets.rds.gz") %>%
+  select(user_id, followers_count) %>%
+  distinct(user_id, .keep_all = TRUE) %>%
+  slice_sample(n = 9000) %>%
+  mutate(across(everything(), as.numeric),
+         dataset = "unfiltered stream")
+  
+#load user_ids from dataset
+user_sample = raw_tweets %>%
+  select(user_id, followers_count) %>%
+  distinct(user_id, .keep_all = TRUE) %>%
+  mutate(dataset = "charlottesville")
+
+#plot density graph 
+bind_rows(user_sample, random_users) %>%
+  with_groups(dataset, ~ mutate(., mean = mean(followers_count))) %>%
+  mutate(across(where(is.numeric), ~ log10(. + 1))) %>%
+  ggplot(aes(x = followers_count, fill = dataset, colour = dataset)) +
+    geom_density(alpha = 0.5) +
+    labs(title = "Distribution of users by # of followers (log transformed)",
+         x = "log10(1 + followers_count)",
+         y = "Density") +
+    scale_fill_discrete_qualitative(palette = "Harmonic") +
+    theme_minimal() +
+    theme(legend.position = "top",
+          strip.text = element_text(face = "bold", size = 10))
+
+```
+
+As for the number of followers, which influences the visibility of each tweet by a user, this follows a  log-normal distribution, shown in Figure 2. A few users have followers over three orders of magnitude higher than the mean, which is 11505 followers. Figure 2 also compares the users in the dataset with my own random sample of 9000 users, [^3] to indicate the typicality of the composition of the tweeting public in terms of followers. While the distributions are globally similar, the users in the Charlottesville dataset have on average many more followers than the random sample, whose mean is `r round(mean(random_users$followers_count), 0)`. The difference between the means of the two distributions is statistically significant (*p* < `r if (t.test(log1p(random_users$followers_count), log1p(user_sample$followers_count))$p.value < 0.01) {0.01}`). The #Charlottesville public accordingly contains more highly visible tweeters than average.
+
+[^3]:Collected by randomly streaming tweets via the twitter API, mid-afternoon on 08/06/2020.
+
+# Hashtags
+
+Hashtags are the most usual way to examine public debate on Twitter. They organise tweets, allowing users to create a channel for discussion, to which users can ‘tune in’ by searching for the hashtag. They are user-generated and so allow for creativity: new channels are formed on the fly in response to current events, sub-channels collect particular aspects of the discussion, people combine hashtags to publish to different channels. Bruns and Burgess (2011) argue that hashtags thereby allow the formation of an ‘ad hoc issue public’: Twitter allows a public to dynamically assemble itself and interact in response to an event. They emphasise that hashtags do not necessarily imply conscious and deliberate engagement: users can contribute to a hashtag-channel without being aware of others’ contributions.  However, the Unite the Right rally and Trump’s comments were such heavily reported events that nearly all tweeters in the dataset directly engaged with the reports and a narrow set of issues. In this regard the dataset is characteristic of what Barisione et al. (2019) term a ‘digital movement of opinion’: mass online expression of opinion on a particular topic, generally one sided, that is  ‘temporally un-sustained’ (the peak apparently lasts only a few hours), and formally ‘un-organised’. In fact, as Bruns and Burgess (2011) argue, hashtags are the way in which a twitter public organises itself and structure the association of topics. Analysis of hashtags can reveal how the twitter public gather around an issue.
+
+The principal hashtags in the dataset are #impeachtrump and #impeachtrumpnow. Less than a year after Trump’s election, the movement to impeach him was still in full swing, fuelled by tidbits leaked from the Mueller investigation into Russian ties. Trump’s comments about ‘blame on both sides’ were taken by these tweeters as just another example of his unfitness for office. The creativity of hashtags is on full display, including #impeachtheracist, #impeachthisfuckernow, the hopeful #impeached, and #impeachpencetoo. But these hashtags do not represent nearly a majority of tweets: even the most common, #impeachtrump, peaks at 6 tweets/min out of a total of 300 tweets/min in the evening of August 15th (Figure 1). Generally, the hashtags in the dataset show little variation over time, almost all peaking with the initial spike in tweets (Figure 1); the exception is #barcelona, which peaks at the end as tweeters link #Charlottesville to a terror attack in Barcelona on August 17th. 
+
+Rather than considering the hashtags over time, more interesting patterns emerge if we consider the co-occurrences of hashtags in the same tweet. Studying hashtag associations is a common way to analyse associations made between concepts (e.g Pavan and Mainardi 2018), and it shows us the structuring of the sub-topics of debate. Figure 3 shows the 20 most frequent hashtags in the dataset (except of course #Charlottesville), recuperated case-insensitively and then linked by the number of co-occurrences in the same tweet. The network has been drawn using the layout algorithm named after Fruchterman and Rheingold (1991), which models the network as a cluster of springs, pulling closely associated hashtags together.
+
+``` {r hashtags, fig.cap = "Network of top 20 associated hashtags"}
+## Hashtag network ##
+
+#get hashtags
+hashtags = by_word %>%
+  filter(str_detect(word, "^#"))
+
+#get top 20 hashtags
+top_hashtags = hashtags %>%
+  count(word) %>%
+  slice_max(n, n = 20) %>%
+  pull(word)
+
+#plot as network of co-occurrences
+set.seed(45480)
+hashtags %>%
+  filter(word %in% top_hashtags) %>%
+  pairwise_count(word, id, upper = FALSE) %>% #count co-occurrences by tweet
+  tbl_graph(edges = ., directed = FALSE) %>% #make network
+  activate(edges) %>%
+  filter(n > 20) %>% #only > 20 co-occurrences
+  activate(nodes) %>%
+  filter(local_size() > 1) %>% #only ones connected to the network
+  ggraph(layout = "fr", weights = .data$n, niter = 1e6) +
+    geom_edge_link(aes(edge_colour = n), width = 1.5, alpha = 0.5) +
+    geom_node_text(aes(label = name, size = local_size())) +
+    labs(title = "Co-occurrence of top 20 hashtags",
+         subtitle = "> 20 co-occurences and > 1 neighbour only",
+         caption = "Layout algorithm:  fr") +
+    scale_x_continuous(expand = c(0.05, 0.05)) +
+    scale_edge_colour_gradientn(name = "number of\nco-occurences",
+                                colours = sequential_hcl(palette = "Terrain", n = 5, rev = TRUE)) +
+    scale_size_continuous(range = c(4, 5), name = "number of\nneighbours") +
+    theme_classic()
+
+```
+
+``` {r vis_word_pairs}
+## Functions to visualise examples ##
+
+print_tweets = function(tweet_rows) {
+  twt_brk = str_c(rep('-', 50), collapse = "")
+  tweet_rows %>%
+    mutate(across(where(is.character), ~ str_remove_all(., "\\n"))) %>%
+    with(print(str_glue("\n{twt_brk}\n{user_name} | @{screen_name} | {created_at %>% with_tz('US/Eastern') %>% strftime('%d %b %Y %R')} EST\n{str_wrap(full_text, indent = 3, exdent = 3, width = 80)}")))
+  cat(twt_brk)
+}
+
+show_pairs = function(word1, word2, n = 3, seed = 1234) {
+  set.seed(seed)
+  tweets %>%
+    filter(str_detect(full_text, str_c("(?i)", word1)),
+           str_detect(full_text, str_c("(?i)", word2))) %>%
+    slice_sample(n = n) %>%
+    print_tweets()
+}
+
+  
+```
+
+Figure 3 shows multiple groups of hashtag association. #trump and #impeachtrump form the center, along with #maga (‘make america great again’). These three hashtags, shown in the tweets below, generally group anger at and opposition to Trump, criticism of his allegedly racist words. Tweets often combine hashtags both nominally pro-Trump (#maga) and anti-trump (#impeachtrump) in order to be heard on both pro- and anti-trump channels, fighting for airtime and contesting ownership of the hashtags #trump and #maga. At stake is the image of Trump’s presidency and the extent to which anti-trump protesters will succeed in linking it to the racism of protests at Charlottesville.
+
+``` {r vis_impeach_trump}
+show_pairs("#impeachtrump", "#maga", seed = 226)
+``` 
+
+A second group combines hashtags that discuss right and left political groups (#altleft, #altright) and racism (#racism, #kkk, #whitesupremacists). Tweeters siding with the counter-protest associate terms that designate right-wing groups with racism, especially the hashtag #altright that designates extremism. Tweeters in support of Unite the Right counter with their own hashtag designating extremism, #altleft. They respond to the association of #altright with #racism by associating their own derogatory #altleft with #altright, an association that implies that both protests contained extremists and so pollutes the counter-protest’s use of the #altright channel by pushing Trump’s ‘both sides’ line. This is shown particularly clearly in the third tweet below. The result of this contesting of hashtag channels is the global association of all these hashtags in Figure 3.
+
+```{r vis_altleft}
+show_pairs("#altright", "altleft", seed = 1235)
+```
+
+The third grouping is not linked to left-right terms and racism, and contains various #impeach and #resistance hashtags along with #heatherheyer (the woman killed). These hashtags do not contrast the two protests, but oppose Trump in general terms, calling for impeachment and using the political metaphor of ‘resistance’. The emotive fatality is mobilised in an us/them struggle:
+``` {r vis_heather}
+show_pairs("#resist", "#heatherheyer", seed = 3115)
+```
+The hashtags therefore reveal two opposed frames in which to contest Charlottesville: in terms of right and left wing, racist and anti-racist protestors; or as part of a national campaign to resist and impeach Trump. Both are linked to a contest over Trump and his presidency, and attempts to associate it with racism and facism in the light of his commments.
+
+# Mentions
+
+Use of \@ to mention another username in a tweet is a form of address, directly notifying the targeted username. While it can be used to contact a user privately, it also has a performative aspect (Bigey 2018). If the mention is placed in a public tweet, everyone can see that the tweeter is addressing the named account. If that account is widely known, it becomes demonstration to everyone that the tweeter, as an ordinary citizen, is demanding a response from a publicly known figure. A mention therefore dramatises the public space: if we see public tweeting as a crowd where everyone can shout, but where some prominent personalities occupy a stage by virtue of being the center of attention, a mention shows that a member of the crowd is shouting at the stage. It is very common in the dataset: around a third of tweets contain one. To explore this phenomenon, I will not consider which accounts are addressed together so much as what tweeters are saying when they address – and are seen addressing – certain accounts.
+
+In Figure 4, I have taken the 30 words most associated to each of the 10 accounts most commonly addressed with \@, and plotted the words’ associations to the accounts in a network, using the same Fruchterman-Reingold layout algorithm. The effect is to bunch accounts that are addressed in similar words, although there is no link between the accounts themselves. Words occur between accounts when they are used to address both, and out to one side if they are only associated with two accounts (words with a single association have been removed).
+
+``` {r at_assocs, fig.cap = "Words associated to accounts mentioned with \\@"}
+
+#get top 10 @s
+top_ats = by_word %>%
+  filter(str_detect(word, "^@")) %>%
+  count(word, name = "n_at") %>%
+  slice_max(n_at, n = 10) 
+
+#count associations to top ats
+top_at_assocs = by_word %>%
+  pairwise_count(word, id) %>%
+  inner_join(top_ats, by = c("item1" = "word")) %>% #filtering join
+  filter(!str_detect(item2, "^@"))
+
+#plot as network
+set.seed(3990)
+top_at_assocs %>% 
+  with_groups(item1, ~ slice_max(., n, n = 30)) %>% #get top 30 associations
+  tbl_graph(edges = .) %>% #make network
+  mutate(is_at = str_detect(name, "^@")) %>% #define @s
+  filter(local_size() > 2) %>% # > 1 neighbour
+  ggraph(layout = "fr" , weights = .data$n, niter = 1e6) +
+    geom_edge_link(aes(edge_colour = n), alpha = 0.5, width = 1.5) +
+    geom_node_text(aes(label = name, size = is_at), alpha = 0.7) +
+    labs(title = "Co-occurrence of concepts with top 10 @s",
+         subtitle = "> 1 neighbour only",
+         caption = "Layout algorithm:  fr") +
+    scale_edge_colour_gradientn(name = "number of\nco-occurences ",
+                                trans = log10_trans(),
+                                colours = sequential_hcl(palette = "Terrain",
+                                                         n = 5, rev = TRUE)) +
+    scale_size_discrete(range = c(3.5, 5), guide = FALSE) +
+    theme_classic()
+
+```
+
+Figure 4 shows that \@realdonaldtrump and \@potus (‘President Of The United States’) are addressed in very similar terms: ‘nazi’ ‘attack’ ‘terrorist’ ‘hate’, ‘us’, ‘people’, ‘both sides’ are all used to address both as would be expected by a globally critical group of tweeters. \@gop (the Republican Party) and \@speakerryan [^4] are addressed in similar terms, by tweeters who exhort them to think of ‘party’, ‘country’, ‘support’, ‘moral’(ity) and the ‘kkk’: an attempt is being made to divide them from their president. ‘#impeachtrump’ and ‘nazi’ are associated with them as well as with Trump: tweeters are exhorting them to stand up to Trump by impeaching him. \@foxnews, \@cnn and \@seanhannity[^5] are associated, with ‘truth’ and ‘blame’, as the two networks are frequently contrasted by Trump and his opponents as, variously, paragons of impartial news and dishonest rumour-mongerers. Finally the left-wing media, \@nytimes, and \@vice, as well as \@youtube, like Vice News an internet platform, are associated in similar terms: ‘watch’, ‘tonight’, and – showing their counter-protest take on the issue – ‘race’.
+
+[^4]: At the time, the most senior Republican politican apart from Trump and Vice-President Pence.
+[^5]: A Fox News host, then as now a prominent Trump supporter.
+
+The topics used to address prominent accounts accordingly group the accounts in a clear and meaningful fashion. There is criticism of Trump, attempts to divide him from the Republican Party, staging of the long-running debate between CNN and Fox News, and interaction with video and internet media who are publishing video footage from the protests. This network accordingly shows ways in which ordinary accounts conceptually position the notable accounts that they publicly address. While only a preliminary analysis, it starts to reveal the staging by ordinary accounts of a public confronation between famous people and organisations.
+
+# Oppositions
+
+Social spaces are formed by the construction of difference, and so an alternative way of exploring the text of tweets is by attempting to visualise differences between actors in the public space. Many of the analyses and examples so far have dramatised the opposition between two or more actors on the public stage: Trump, the Unite the Right march, the counter-protest, the Republican Party, Fox, CNN, and others. Figure 4 does this, separating opposed accounts while showing the concepts that characterise tweeters’ engagement with them. But it does not show which actors are contrasted in the same tweets. This is an important phenomenon in the dataset: aside from mentions, many of the tweets in the data set are a constant drawing of contrast, a reiteration of opposition, an establishing of an us and a them:
+
+``` {r quote_oppositions}
+tweets %>%
+  filter(id %in% c( 898193873947721728,
+                    898056708878159872,
+                    897633606499172352,
+                    897842376164745216,
+                    897927275190128640,
+                    897997316266831872,
+                    898205849771847680,
+                    898094304454823936)) %>%
+  print_tweets()
+```
+
+These tweets all juxtapose two groups: either the author with another group (variously Trump’s opponents, those who are not outraged, or Trump himself); or two other actors: Trump with the Republican Party, business executives, or the memorial service. Trump is very often the object of the distinction, but not always: here we have the media allegedly ignoring anti-fascist protestors, and a group defined in terms of an emotional reaction, outrage.
+
+``` {r load_actors_dict}
+dict = read_csv("../resources/actors_dict.csv")
+#takes a while so load a pre-coded one
+if (FALSE) {
+  dict_coded = regex_full_join(by_word, dict, by = c("word" = "word_rx"))
+  write_rds(dict_coded, "../resources/twts_coded.rds.gz", compress = "gz")
+} else dict_coded = read_rds("../resources/twts_coded.rds.gz")
+
+```
+
+In order to attempt to map the oppositions between social actors in the tweets, I start from the hypothesis that when any actors co-occur in a tweet they are opposed. This hypothesis is clearly false, but the hostility of the dataset is such that I feel it is right more often than not. The co-occurences of actors, as coded by the dictionary, are then plotted as a network, but unlike the previous networks the layout is determined by Multidimensional Scaling so as to separate, not gather, words that co-occur the most often. Co-occurrence was used, rather than other measures of distance or similarity, because I only wish to measure users’ active contrasting of actors; *not* placing e.g ‘Republicans’ with ‘Trump’ should not imply extra distance or dissimilarity between the usage of the two actors. This process produces a conceptual space where opposed words are placed on opposite poles, following the methodology of Kriesi et al. (2006). Afterwards, in order to identify tweets in which actors are definitely contrasted, the technique was re-run on only tweets that contain one of a dictionary of ‘contrast’ words (such as ‘condemn’, ‘denounce’, ‘against’, ‘while’). This filtering operation comes at the cost of discarding many examples, as well as still mis-classifying sentences of the form ‘X condemns Y and Z’, where Y would be contrasted to Z, as well as to X. The results are shown in Figure 7. 
+
+``` {r oppositions, fig.cap = "Multidimensional scaling on contrasting actors"}
+
+contrast = c("denounce", "denounces", "denouncing", "denounced",
+             "condemn", "condemns", "condemning", "condemned",
+             "attack", "attacks", "attacking", "attacked",
+             "slam", "slams", "slamming", "slammed",
+             #"blame", "blames", "blaming", "blamed", avoid 'blame both sides'
+             "^hate", "^hates", "hating", "^hated",
+             "^sue$", "^sues$", "suing", "sued",
+             "disown", "disowns", "disowning", "disowned",
+             "respond", "responding", "responds", "responded",
+             "call out", "calls out", "calling out", "called out",
+             #others:
+             "response", "against", "but", "however", "while", "although"
+             )
+
+#get ids of all tweets that contain the contrast words
+contrast_ids = tweets %>%
+  filter(str_detect(full_text, str_c(contrast, collapse = "|"))) %>%
+  pull(id)
+
+#helper function to plot mds
+#takes grouped output of widyr::pairwise_() via dplyr::group_map(), returns mds plot
+mds_plot = function(simil_df, group_info, text_size = 5) {
+  
+  #get title from group name
+  plot_title = unlist(group_info) %>% as.character()
+  
+  #make wide form
+  simil_square = simil_df %>%
+    pivot_wider(names_from = item2,
+                values_from = n) %>%
+    relocate(item1, pull(., item1))  #get rows and columns in same order
+  
+  #transform wide form into a distance matrix
+  simil_mat = simil_square %>%
+    select(-item1) %>%
+    as.matrix()
+  
+  #replace NAs in matrix to avoid plotting error
+  diag(simil_mat) = 1
+  simil_mat = replace(simil_mat, is.na(simil_mat), 0)
+  
+  #create the network and plot
+  create_complete(nrow(simil_mat)) %>%
+    mutate(name = simil_square$item1) %>%
+    ggraph(layout = "mds", dist = simil_mat) + 
+      geom_node_text(aes(label = name), size = text_size, fontface = "bold",
+                     alpha = 0.7) +
+      geom_vline(xintercept = 0, linetype = "dashed") +
+      geom_hline(yintercept = 0, linetype = "dashed") +
+      scale_x_continuous(expand = c(0.1, 0.1)) +
+      scale_y_continuous(expand = c(0.1, 0.1)) +
+      labs(title = plot_title) +
+      theme_bw()
+}
+
+#plot tweets with contrasting words, and everything
+dict_coded %>%
+  filter(!is.na(assoc),
+         assoc_group != "Pronoun") %>%
+  group_by(only_contrast = if_else(id %in% contrast_ids,
+                                   "Only 'contrasting' tweets", "Everything")) %>%
+  relocate(only_contrast, .after = last_col()) %>%
+  group_modify(~ pairwise_count(., assoc, id)) %>%
+  group_map(~ mds_plot(.x, .y)) %>%
+  wrap_plots(nrow = 1) +
+    plot_annotation(title = "Contrasted actors",
+       subtitle = "Distant actors co-occur the most often",
+       caption = "Layout algorithm: MDS")
+```
+
+``` {r visualise_dict_pairs}
+
+## helper function to show word pairs from the dictionary ##
+show_dict_pairs = function(assoc1, assoc2, n = 5, seed = 123, only_contrast = FALSE) {
+  
+  #construct regex by association in dictionary
+  or_rx = function(an_assoc) {
+    dict %>%
+      filter(assoc == an_assoc) %>%
+      pull(word) %>%
+      str_replace("\\$", "") %>%
+      str_c(collapse = "\\W|\\W")
+  } 
+  
+  if (only_contrast) {
+    ctr_tweets = tweets %>% filter(str_detect(full_text, str_c(contrast, collapse = "|")))
+  } 
+  else ctr_tweets = tweets
+  
+  #visualise
+  set.seed(seed)
+  ctr_tweets %>%
+    filter(str_detect(full_text, or_rx(assoc1)),
+           str_detect(full_text, or_rx(assoc2))) %>%
+    slice_sample(n = n) %>%
+    print_tweets()
+}
+
+```
+
+Starting with the panel based on all tweets, Trump is the actor most placed – and so most contrasted – with other actors, which is unsurprising. Certain actors are slightly more contrasted with him: Both Sides, Republicans (Rep), and White Supremacists (White_Sup). This is partly my method mistaking co-occurrence for opposition, but there are nevertheless no small number of tweets where Trump is placed alongside Republicans in order to be opposed to them, as we will see more clearly below. Meanwhile, although distances are smaller on the y-axis, Racist and News are also contrasted; from the following tweets it appears that while the news media are sometimes said to be simply reporting racism (the second tweet), the hypothesis that all juxtaposition implies a contrast or opposition is in fact stronger than might be supposed. The first and third tweets accuse the media [^6] of misrepresenting the racists or ‘real racists’ at the protest, and imply deliberate manipulation of the facts.
+
+[^6]:\@theblaze is a right-wing news website.
+
+```{r vis_news_racist}
+show_dict_pairs("Racist", "News", 3, 234)
+```
+
+Restricting the analysis to only tweets that contain a ‘contrasting’ word, in the second panel, diminishes the apparent opposition between news organisations and racists, while strongly opposing Trump and Republicans. While it might be thought that the two are usually associated, the following examples show that in fact they are often contrasted, as anti-Trump tweeters attempt to divide him from his own party. Tweeters conceptualise them as separate actors and drive a wedge between them.
+
+``` {r vis_trump_sides}
+show_dict_pairs("Rep", "Trump", 3, 12233, only_contrast = TRUE)
+```
+
+Meanwhile, although the y-axis appears to contain more information, the figures on the y-axis show that oppositions along this axis are far less significant compared to the Trump-Republican opposition. The main opposition in this direction is Protest vs. Fascists/Nazis. However, as the following examples show, the visualisation is picking up co-occurrence in tweets that contain ‘contrasting’ words, but that do not necessarily implying a contrast between the two – plenty of ‘nazi protestors’ appear in opposition to other groups.
+
+``` {r vis_nazi_protest}
+show_dict_pairs("Fascist", "Protestors", 3, only_contrast = TRUE)
+```
+
+# Conclusion
+
+The dataset is a record of a short but intense wave of outrage and debate on Twitter in response to President Trump’s comments that there was ‘blame on both sides’ for the violence in Charlottesville. In the dataset alone, which probably represents only a fraction of total activity, tens of thousands of people across the globe intervene in the public space that Twitter offers in order to respond to reported events and engage with other Figures in public debate. Each of their interventions conceptualises the public space and positions different actors, including themselves, within it. 
+
+Here I have presented a number of exploratory analyses of the dataset which attempt to describe the relations between the actors and concepts which structure this public space. The network representation of hashtag association showed how the channels and sub-channels of twitter discussion revolved around certain groupings of topics: the reputation of Trump’s presidency and its association with racism and fascism; right, left and racist groups at the protest; and resistance to Trump along with calls for impeachment and grief over the death of Heather Heyer. The analysis of mention-concept association showed that groups of accounts – the president’s, republican politicians’, internet news’, and the Fox-CNN duo – were consistently addressed in similar ways by users who saw them as having a certain relationship to events. The networks of hashtag and mention association appear promising avenues for further exploration.
+
+An attempt to map opposed concepts based, counter-intuitively, on their co-occurrence in tweets had some success, identifying marked oppositions between Trump and Republicans – whom tweeters tried to separate – as well as the media and racists at the protests, as tweeters insisted that the media misrepresented racist groups. However, the methodology was not fully able to distinguish association from opposition; a better way of deciding when concepts in tweets are 'opposed' is needed.
+
+## References
+\setlength{\parindent}{-0.2in}
+\setlength{\leftskip}{0.2in}
+\setlength{\parskip}{8pt}
+\noindent

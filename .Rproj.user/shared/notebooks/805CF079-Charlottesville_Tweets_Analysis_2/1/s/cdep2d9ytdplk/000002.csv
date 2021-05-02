@@ -1,0 +1,6 @@
+"0","  tweet_rows %>%
+    mutate(across(is.character, str_remove_all(""[^[:ascii]]""))) %>% #Word can't handle emojis
+    with(print(str_glue(""\n{twt_brk}\n{user_name} | @{screen_name} | {with_tz(created_at, 'US/Eastern') %>% strftime('%d %b %Y %R')} EST\n{str_wrap(full_text, indent = 3, exdent = 3, width = 60)}"")))
+"
+"2","Error in eval(lhs, parent, parent) : object 'tweet_rows' not found
+"

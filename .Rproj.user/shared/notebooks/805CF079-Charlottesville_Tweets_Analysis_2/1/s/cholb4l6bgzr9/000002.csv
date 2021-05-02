@@ -1,0 +1,9 @@
+"0","tweets_sentiments %>%
+  filter(str_detect(full_text, ""(?i)trump""),
+         str_detect(full_text, ""(?i)america""),
+         twt_sentiment == 5) %>%
+  slice_sample(n = 3) %>%
+  print_tweets()
+"
+"2","Error in eval(lhs, parent, parent) : object 'tweets_sentiments' not found
+"

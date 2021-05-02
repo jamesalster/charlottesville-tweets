@@ -1,0 +1,7 @@
+"0","user_tweets %>%
+  group_by(over_5 = n > 5)
+"
+"2","Error: Problem with `mutate()` input `over_5`.
+[31mx[39m comparison (6) is possible only for atomic and list types
+[34mi[39m Input `over_5` is `n > 5`.
+"

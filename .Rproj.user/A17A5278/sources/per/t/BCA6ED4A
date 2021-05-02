@@ -1,0 +1,25 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1591530464250.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "2053864784",
+    "id" : "BCA6ED4A",
+    "lastKnownWriteTime" : 1591467854,
+    "last_content_update" : 1591467854,
+    "path" : "~/Desktop/Master_Sociologie/Attachements et Luttes/charlottesville tweets/proper_analysis_1.R",
+    "project_path" : "proper_analysis_1.R",
+    "properties" : {
+        "cursorPosition" : "25,0",
+        "scrollLine" : "12"
+    },
+    "read_only" : false,
+    "read_only_alternatives" : [
+    ],
+    "relative_order" : 1,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

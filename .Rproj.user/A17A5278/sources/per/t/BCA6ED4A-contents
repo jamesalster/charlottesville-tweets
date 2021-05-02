@@ -1,0 +1,535 @@
+#proper analysis 1
+#grouping everything that works
+
+library(tidyverse)
+library(scales)
+library(lubridate)
+library(colorspace)
+#text
+library(cld2)
+library(tidytext)
+library(fuzzyjoin)
+library(topicmodels)
+#networks
+library(widyr)
+library(tidygraph)
+library(ggraph)
+library(patchwork)
+
+#### Import Data ####
+#downloaded from https://www.kaggle.com/vincela9/charlottesville-on-twitter/version/1
+
+raw_tweets = tibble(filename = str_c("data/aug", 15:17, "_sample.csv.zip")) %>%
+  rowwise() %>%
+  summarise(filename = filename,
+            read_csv(filename))
+
+#### Word Groups ####
+
+groups = c("white supremacis",
+           "white nationalis",
+           "klu klux klan",
+           "black lives matter",
+           "both sides",
+           "fake news",
+           "fox news",
+           "white house",
+           "the people",
+           "press conference") 
+
+make_groupings = function(text_vec, groups) {
+  gp_rx = str_c(groups, collapse = "|")
+  str_replace_all(text_vec, gp_rx, function(x) str_replace_all(x, "\\s", "_"))
+}
+
+#### Tokenise and Code ####
+
+tweets = raw_tweets %>%
+  filter(detect_language(full_text) == "en") %>%  #only english
+  mutate(full_text = make_groupings(full_text, groups)) #group important word sequences
+  
+by_word = tweets %>%   
+  unnest_tokens(word, full_text, token = "regex",
+                pattern = "[[:punct:][:space:]-[\\'/#@_-]]", to_lower = TRUE) %>% #move to one-word-per-row
+  filter(!str_detect(word, "^(https|t|www|s|//t|n|[0-9]|-)$"), #no url bits, which we've broken up
+         !str_detect(word, "^co/"), #ditto
+         !str_detect(word, "[^[:ascii:]]"),  #no emojis
+         !str_detect(word, "^amp$"), #no amp
+         !str_detect(word, "charlottesville")) %>% #no charlottesville
+  anti_join(get_stopwords('en')) #no stopwords
+
+#### analyse ####
+glimpse(tweets)
+
+#we have:
+#tweet id
+#user_id + name + screen_name 
+#description + text colour + background colou
+#full text of the tweet + date
+#isolated hashtags, not used here
+#no retweets
+sum(tweets$is_retweet, na.rm = TRUE)
+#whether replies 
+sum(!is.na(tweets$in_reply_to_status_id))
+#of which not many in database
+with(tweets, sum(id %in% in_reply_to_status_id))
+#the 4 numeric ones
+#location: could be anywhere; _ time_zone
+tweets %>%
+  mutate(time_zone = fct_lump(user_time_zone, n = 4)) %>%
+  group_by(time_zone) %>%
+  summarise(n = n(),
+            percent = n() / nrow(.) * 100) %>%
+  arrange(desc(n))
+  
+  
+#n of tweets
+nrow(tweets)
+#n of users
+unique(tweets$user_id) %>%
+  length()
+##locations: users can enter whatever they want
+unique(tweets$user_location) %>%
+  length()
+
+#### Tweets over time ####
+
+raw_tweets_est = raw_tweets %>%
+  mutate(created_at_est = with_tz(created_at, "US/Eastern"))
+
+last_twts = raw_tweets_est %>%
+  group_by(filename) %>%
+  summarise(time = max(created_at))
+
+ggplot(raw_tweets_est, aes(x = created_at_est, fill = filename)) +
+  #..count.. exposes number per unit of x (here, per second).
+  #adjust adjusts the bin size for smoothing
+  geom_density(aes(y = ..count.. * 60), adjust = 1/2) +
+  geom_vline(data = last_twts, aes(xintercept = time), linetype = "dashed") +
+  scale_x_datetime(breaks = breaks_pretty(8),
+                   labels = label_date_short(format = c("", "", "%b %d", "%H:%M"))) +
+  scale_y_continuous(name = "tweets per minute") +
+  labs(x = "time created, EST",
+       title = "Distribution of tweets by time created",
+       subtitle = str_glue("n = {nrow(raw_tweets_est)}, {nrow(raw_tweets_est) / 3} per file")) +
+  scale_fill_discrete_qualitative(palette = "Harmonic") +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+### basic stuff
+#numeric ones relatively correlated around 1, nothing super interesting
+tweets %>%
+  distinct(user_id, .keep_all = TRUE) %>%
+  select(ends_with("count")) %>%
+  slice_sample(n = 1000) %>%
+  mutate(across(everything(), log1p)) %>%
+  ggpairs(columns = 1:4) +
+    labs(title = "Multi-plot of numeric variables",
+         x = "log(value + 1)",
+         y = "log(value + 1)",
+         subtitle = "sample of 1000 tweets") +
+    theme_minimal() +
+    theme(strip.text = element_text(face = "bold"))
+
+
+#### Hashtags ####
+
+### not much to see except that #impeach hashtags peak with the initial one
+#link with #barcelona peaks at end?
+#but not representing even the majority
+#hashtag network
+
+#get hashtags
+hashtags = by_word %>%
+  filter(str_detect(word, "^#"))
+
+#get top 20 hashtags
+top_hashtags = hashtags %>%
+  count(word) %>%
+  slice_max(n, n = 20) %>%
+  pull(word)
+
+#plot over time
+hashtags %>%
+  filter(str_detect(word, "^#(impeach|barcelona)")) %>%
+  left_join(count(., word)) %>%
+  select(word, n, created_at) %>%
+  mutate(., n = fct_reorder(word, n)) %>%
+        # word %in% c("#impeachtrump", "#heatherheyer", "#barcelona")) %>%
+  ggplot(aes(x = created_at, colour = word)) +
+  geom_density(aes(y = ..count.. * 60))
+
+#plot as network of co-occurrences
+set.seed(45480)
+hashtags %>%
+  filter(word %in% top_hashtags) %>%
+  pairwise_count(word, id, upper = FALSE) %>% #count co-occurrences by tweet
+  tbl_graph(edges = ., directed = FALSE) %>% #make network
+  activate(edges) %>%
+  filter(n > 20) %>% #only > 20 co-occurrences
+  activate(nodes) %>%
+  filter(local_size() > 1) %>% #only ones connected to the network
+  ggraph(layout = "fr", weights = .data$n, niter = 1e6) +
+    geom_edge_link(aes(edge_colour = n), width = 1.5, alpha = 0.5) +
+    geom_node_text(aes(label = name, size = local_size())) +
+    labs(title = "Co-occurrence of top 20 hashtags",
+         subtitle = "> 20 co-occurences and > 1 neighbour only",
+         caption = "Layout algorithm:  Fruchterman-Reingold") +
+    scale_x_continuous(labels = NULL, expand = c(0.05, 0.05)) +
+    scale_y_continuous(labels = NULL) +
+    scale_edge_colour_gradientn(name = "number of\nco-occurences",
+                                colours = sequential_hcl(palette = "Terrain", n = 5, rev = TRUE)) +
+    scale_size_continuous(range = c(4, 5), name = "number of\nneighbours") +
+    theme_classic()
+
+##### @s ####
+
+#get top 10 @s
+top_ats = by_word %>%
+  filter(str_detect(word, "^@")) %>%
+  count(word, name = "n_at") %>%
+  slice_max(n_at, n = 10) 
+
+#count associations to top ats
+top_at_assocs = by_word %>%
+  pairwise_count(word, id) %>%
+  inner_join(top_ats, by = c("item1" = "word")) %>% #filtering join
+  filter(!str_detect(item2, "^@"))
+
+#plot top associations as barchart
+top_at_assocs %>%
+  mutate(label = str_glue("{item1}, n = {n_at}"), #create facet titles
+         label = fct_reorder(label, -n_at)) %>% #reorder facets
+  with_groups(item1, ~ slice_max(., n, n = 6)) %>% #get top 6 associations
+  ggplot(aes(x = reorder_within(item2, n, item1), y = n)) +
+    geom_col() +
+    facet_wrap(~label, scales = "free", labeller = label_wrap_gen()) +
+    coord_flip() +
+    scale_x_reordered() +
+    scale_fill_discrete_qualitative(palette = "Harmonic", guide = FALSE) +
+    labs(title = "Top associations to top 10 @s",
+         x = "word", y = "number of co-occurrences") +
+    theme_minimal() +
+    theme(strip.text = element_text(size = 11, face = "bold"))
+
+#plot as network
+set.seed(34755)
+top_at_assocs %>% 
+  with_groups(item1, ~ slice_max(., n, n = 30)) %>% #get top 30 associations
+  tbl_graph(edges = .) %>% #make network
+  mutate(is_at = str_detect(name, "^@")) %>% #define @s
+  filter(local_size() > 2) %>% # > 1 neighbour
+  ggraph(layout = "fr" , weights = .data$n, niter = 1e6) +
+    geom_edge_link(aes(edge_colour = n), alpha = 0.5, width = 1.5) +
+    geom_node_text(aes(label = name, size = is_at)) +
+    labs(title = "Co-occurrence of concepts with top 10 @s",
+         subtitle = "> 1 neighbour only",
+         caption = "Layout algorithm:  Fruchterman-Reingold") +
+    scale_edge_colour_gradientn(name = "number of\nco-occurences ",
+                                trans = scales::log10_trans(),
+                                colours = sequential_hcl(palette = "Terrain",
+                                                         n = 5, rev = TRUE)) +
+    scale_x_continuous(labels = NULL) +
+    scale_y_continuous(labels = NULL) +
+    scale_size_discrete(range = c(3.5, 5), guide = FALSE) +
+    theme_classic()
+
+
+#### Tweet sentiment ####
+
+tweets_sentiments = by_word %>% 
+  inner_join(get_sentiments('afinn'), by = "word") %>%
+  group_by(id) %>%
+  summarise(twt_sentiment = sum(value)) %>%
+  right_join(tweets, by = "id")
+
+#concentrated around 0
+#we could split pos/neg but not much
+ggplot(tweets_sentiments, aes(x = twt_sentiment)) +
+  geom_histogram(aes(y = ..count..), binwidth = 1, fill = "forestgreen") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  coord_cartesian(xlim = c(-15, 10)) +
+  labs(x = "sum of word sentiments, using the AFINN dictionary",
+       y = "number of tweets",
+       title = "Histogram of tweets by sentiment") +
+  theme_minimal()
+
+##doesn't particularly distinguish assoc or not
+set.seed(1232)
+tweets_sentiments %>%
+  filter(str_detect(full_text, "(?i)trump"),
+         str_detect(full_text, "(?i)america"),
+         twt_sentiment == -5) %>%
+  slice_sample(n = 5) %>%
+  with(str_wrap(full_text))
+
+set.seed(1232)
+tweets_sentiments %>%
+  filter(str_detect(full_text, "(?i)trump"),
+         str_detect(full_text, "(?i)america"),
+         twt_sentiment == 5) %>%
+  slice_sample(n = 5) %>%
+  with(str_wrap(full_text))
+
+
+#### Dictionary of Nouns ####
+
+dict = tribble(
+  ~assoc_group, ~assoc, ~word,
+#  "Pronoun", "I", c("i$", "me$", "my$", "mine", "i\\'m", "i\\'ve"),
+#  "Pronoun", "You", c("you$", "your$", "yours", "ur$", "u$", "you\\'re", "you\\'ve"),
+#  "Pronoun", "Third_Person", c("he$", "him$", "his$", "she$", "her", "hers", "he", "she"),
+#  "Pronoun", "We", c("we$", "us$", "our", "ours", "we$", "we\\'re", "we\\'ve"), 
+#  "Pronoun", "They", c("they", "their", "them", "theirs", "they\\'ve", "they\\'re"),
+  "Polits", "Trump", c("trump", "donald", "president", "potus"),
+  "Polits", "Obama", c("barack", "obama"),
+#  "Polits", "Mayor", c("mayor"),
+#  "Polits", "Romney", c("mitt", "romney"),
+  "Party", "Rep", c("republican", "rep$", "reps$", "gop"),
+  "Party", "Dem", c("democrat", "dem$", "dems$"),
+  "Left", "Antifa", c("antifa", "anti-fa"),
+  "Right", "Alt_Right", c("alt-right", "altright"),
+  "Right", "Fascist", c("facist", "nazi"),
+  "Right", "Right", c("right"),
+  "Left", "Alt_Left", c("alt-left", "altleft"),
+  "Left", "Liberal", c("liberal", "libs"),
+  "Left", "Left", c("left"),
+  "Particip", "Protestors", c("protest", "demonstrat", "march", "counter-protest"),
+  "Particip", "Victim", c("victim", "heather", "heyer"),
+  "Particip", "Driver", c("driver", "murderer", "killer"),
+  "Race", "White", c("white$"),
+  "Race", "KKK", c("kkk", "klan"),
+  "Race", "Black", c("black$"),
+  "Race", "Racist", c("race$", "racist", "anti-semit"),
+  "Race", "White_Sup", c("white_supremacist", "white_nationalist"),
+  "Race", "BLM", c("black_lives_matter"),
+  "Country", "America", c("america", "country", "nation$"),
+ # "Country", "The_People", c("the_people"),
+  "Sides", "Sides", c("both_sides"),
+  "Media", "Fake_News", c("fakenews", "fake_news"),
+  "Media", "News", c("news",  "journalist", "media", "newspaper"),
+  "Media", "Fox", c("fox_news", "foxnews"),
+  "Media", "CNN", c("cnn"),
+  "Media", "NyTimes", c("nytimes")
+) %>%
+  unnest(word) %>%
+  mutate(word_rx = str_c("(^|#)", word)) #only match start of string or hashtag
+
+#write_csv(dict, "actors_dict.csv")
+#code against the dictionary, takes a while
+#dict_coded = regex_full_join(by_word, dict, by = c("word" = "word_rx"))
+#write_rds(dict_coded, "twts_coded.rds.gz", compress = "gz")
+dict_coded = read_rds("twts_coded.rds.gz")
+
+
+##### Similarity in defending ####
+
+defend = c("\\bbacks", "backing", "backed",
+           "defend", "defends", "defending", "defended",
+           "support(?!er)", "supports", "supporting", "supported",
+           "enable", "enables", "enabling", "enabled",
+           "boost", "boosts", "boosting", "boosted",
+           "stand with", "stands with", "standing with", "stood with",
+           "praise", "praises", "praising",  "praised",
+           "thank", "thanks", "thanking", "thanked")
+
+#get ids of all tweets that contain the words
+defend_ids = tweets %>%
+  filter(str_detect(full_text, str_c(defend, collapse = "|"))) %>%
+  pull(id)
+
+#count pairwise occurrence of associations in those tweets
+defend_count = dict_coded %>%
+  filter(id %in% defend_ids) %>%
+  filter(assoc_group != "Pronoun") %>%
+  pairwise_count(assoc, id, upper = FALSE)
+
+#plot as association network
+set.seed(4684)
+defend_count %>%
+  tbl_graph(edges = ., directed = FALSE) %>%
+  activate(edges) %>%
+  filter(n > 5) %>%
+  activate(nodes) %>%
+  filter(local_size() > 3) %>%
+  ggraph(layout = "fr", weights = .data$n, niter = 1e6) +
+    geom_edge_link(aes(edge_colour = n), alpha = 0.5, width = 1.5) +
+    geom_node_text(aes(label = name, size = local_size())) +
+    labs(title = "Co-occurrence of actors in 'defending' tweets",
+         subtitle = "> 20 co-occurences and > 2 neighbours only",
+         caption = "Layout algorithm: Fruchterman-Reingold") +
+    scale_x_continuous(labels = NULL, expand = c(0.05, 0.05)) +
+    scale_y_continuous(labels = NULL) +
+    scale_edge_colour_gradientn(name = "number of\nco-occurences",
+                                trans = scales::log10_trans(),
+                                colours = sequential_hcl(palette = "Terrain", n = 5,
+                                                          rev = TRUE)) +
+    scale_size_continuous(range = c(3, 5), name = "number of\nneighbours",
+                          breaks = breaks_width(2)) +
+    coord_fixed() +
+    theme_classic() 
+
+#### MDS: difference in not ####
+
+contrast = c("denounce", "denounces", "denouncing", "denounced",
+             "condemn", "condemns", "condemning", "condemned",
+             "attack", "attacks", "attacking", "attacked",
+             "slam", "slams", "slamming", "slammed",
+             "blame", "blames", "blaming", "blamed",
+             "^hate", "^hates", "hating", "^hated",
+             "^sue$", "^sues$", "suing", "sued",
+             "disown", "disowns", "disowning", "disowned",
+             "respond", "responding", "responds", "responded",
+             "call out", "calls out", "calling out", "called out",
+             #others:
+             "response", "against", "but", "however", "while", "although"
+             )
+
+#get ids of all tweets that contain the words
+contrast_ids = tweets %>%
+  filter(str_detect(full_text, str_c(contrast, collapse = "|"))) %>%
+  pull(id)
+
+#helper function to plot an mds
+#takes output of pairwise_similarity, returns mds plot
+mds_plot = function(simil_df, group_info, text_size = 5) {
+  
+  #get title
+  plot_title = str_glue("{unlist(group_info)}")
+  
+  #make wide form
+  simil_square = simil_df %>%
+    pivot_wider(names_from = item2,
+                values_from = n) %>%
+    relocate(item1, pull(., item1))  #get rows and columns in same order
+  
+  #transform wide form into a distance matrix
+  simil_mat = simil_square %>%
+    select(-item1) %>%
+    as.matrix()
+  
+  #replace NAs to avoid errors
+  diag(simil_mat) = 1
+  simil_mat = replace(simil_mat, is.na(simil_mat), 0)
+  
+  #create the network and plot
+  create_complete(nrow(simil_mat)) %>%
+    mutate(name = simil_square$item1) %>%
+    ggraph(layout = "mds", dist = simil_mat) + 
+      geom_node_text(aes(label = name), size = text_size, fontface = "bold",
+                     alpha = 0.7) +
+      geom_vline(xintercept = 0, linetype = "dashed") +
+      geom_hline(yintercept = 0, linetype = "dashed") +
+      scale_x_continuous(expand = c(0.1, 0.1)) +
+      scale_y_continuous(expand = c(0.1, 0.1)) +
+      labs(title = plot_title) +
+      theme_bw()
+}
+
+#do it
+filtered_assocs = dict_coded %>%
+  filter(!is.na(assoc),
+         assoc_group != "Pronoun")
+
+#contrast, no defend
+filtered_assocs %>%
+  group_by(only_contrast = if_else(id %in% contrast_ids,
+                                   "Only 'contrasting' tweets", "Everything")) %>%
+  relocate(only_contrast, .after = last_col()) %>%
+  group_modify(~ pairwise_count(., assoc, id)) %>%
+  group_map(~ mds_plot(.x, .y)) %>%
+  wrap_plots(nrow = 1) +
+    plot_annotation(title = "Contrasted actors",
+       subtitle = "Distant actors co-occur the most often",
+       caption = "Layout algorithm: MDS") 
+
+#all
+filtered_assocs %>%
+  mutate(grouped_assoc_group = fct_collapse(assoc_group,
+                                            "Politics" = c("Left", "Right", "Party", "Polits"),
+                                            "Citizens, Groups of Citizens" = c("Country", "Race", "Particip"))) %>%
+  group_by(grouped_assoc_group) %>%
+  group_modify(~ pairwise_count(., assoc, id)) %>%
+  group_map(~ mds_plot(.x, .y, text_size = 4)) %>%
+  wrap_plots() +
+    plot_annotation(title = "Contrasted actors",
+                    subtitle = "Distant actors co-occur the most often",
+                    caption = "Layout algorithm: MDS") 
+
+####  Visualise ####
+
+show_wd_pairs = function(assoc1, assoc2, n = 5) {
+  or_rx = function(an_assoc) {
+    dict %>%
+      filter(assoc == an_assoc) %>%
+      pull(word) %>%
+      str_replace("\\$", "") %>%
+      str_c(collapse = "\\W|\\W")
+  } 
+  
+  tweets %>%
+    filter(str_detect(full_text, or_rx(assoc1)),
+           str_detect(full_text, or_rx(assoc2))) %>%
+    slice_sample(n = n) %>%
+    with(str_view_all(full_text, str_c("(?i)", or_rx(assoc1), "|", or_rx(assoc2))))
+}
+show_wd_pairs("White", "The_People")
+
+#### Topic Modelling ####
+
+#tfidf is poor bc of doc size
+top_words = by_word %>%
+  filter(!str_detect(word, "^(#|@)")) %>% #no ats or hashtags
+  filter(!word %in% c("trump", "trump's", "via")) %>%
+  count(word) %>%
+  slice_max(n, n = 100) %>%
+  pull(word)
+
+dtm = by_word %>%
+  filter(word %in% top_words) %>%
+  count(id, word) %>%
+  cast_dtm(id, word, n)
+
+topic_mod = LDA(dtm, k = 9, control = list(seed = 234932))
+#write_rds(topic_mod, "new_topic_mod.rds.gz")
+#topic_mod = read_rds("decent_tm.rds.gz")
+
+topic_words = tidy(topic_mod, matrix = "beta") 
+
+twts_by_topic = tidy(topic_mod, matrix = "gamma") %>%
+  with_groups(document, ~ slice_max(., gamma, n = 1))
+
+topic_words %>%
+  left_join(count(twts_by_topic, topic), by = "topic") %>%
+  mutate(label = str_glue("topic {topic}, n = {n}"), #create facet titles
+         across(c(label, topic), ~ as_factor(.) %>% fct_reorder(-n))) %>% #reorder facets
+  with_groups(topic, ~ slice_max(., beta, n = 6)) %>% #get top 6 associations
+  ggplot(aes(x = reorder_within(term, beta, topic), y = beta, fill = topic)) +
+    geom_col() +
+    facet_wrap(~label, scales = "free") +
+    coord_flip() +
+    scale_x_reordered() +
+    scale_fill_discrete_qualitative(palette = "Harmonic", guide = FALSE) +
+    labs(title = "Topic-word associations",
+         x = "word", y = "beta") +
+    theme_minimal() +
+    theme(strip.text = element_text(size = 11, face = "bold"))
+
+vis_topics = function(topic, n = 5) {
+  rx = topic_words %>%
+    filter(topic == !!topic,
+           !str_detect(term, "[[:punct:]|]")) %>%
+    slice_max(beta, n =30) %>%
+    pull(term) %>%
+    str_c(collapse = "\\W|\\W")
+  print(rx)
+  twts_by_topic %>%
+    mutate(id = as.numeric(document)) %>%
+    inner_join(tweets, by = "id") %>%
+    filter(topic == !!topic) %>%
+    slice_max(gamma, n = n) %>%
+    with(str_view_all(full_text, rx))
+}
+
+vis_topics(5)
+
